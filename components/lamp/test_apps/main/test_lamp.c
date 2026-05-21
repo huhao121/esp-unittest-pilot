@@ -4,11 +4,14 @@
 
 void app_main(void)
 {
-    // host (linux target) 下非交互地跑完所有 TEST_CASE
+    // 非交互地跑完所有 TEST_CASE。同一份测试在 host(linux) 和板子(esp32s3) 上都能跑。
     unity_run_all_tests();
+#if CONFIG_IDF_TARGET_LINUX
     // FreeRTOS-on-linux 在 app_main 返回后不会退出进程，
-    // 按失败数主动退出，给自动化 / CI 一个明确的退出码
+    // 按失败数主动退出，给自动化 / CI 一个明确的退出码。
+    // 在真板子上没有“进程”可退，跑完让它 idle 即可，所以这段只在 host 编。
     exit(Unity.TestFailures == 0 ? 0 : 1);
+#endif
 }
 
 // ---- lamp_next: 每个状态按一下变成谁 ----
