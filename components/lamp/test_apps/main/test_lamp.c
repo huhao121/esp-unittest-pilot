@@ -71,7 +71,7 @@ TEST_CASE("lamp_color: OFF is black", "[lamp]")
 
 TEST_CASE("lamp_color: RED is full red", "[lamp]")
 {
-    assert_rgb(lamp_color(LAMP_RED), 254, 0, 0);  // 故意改错：期望值应是 255，用来看 CI 变红
+    assert_rgb(lamp_color(LAMP_RED), 255, 0, 0);
 }
 
 TEST_CASE("lamp_color: GREEN is full green", "[lamp]")
