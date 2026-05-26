@@ -1,13 +1,17 @@
-// lamp demo：BOOT 键(GPIO0)切状态，WS2812(GPIO48)显示对应颜色。
-// 纯逻辑全在 lamp 组件里，这里只是薄薄的硬件胶水，不进单测。
+// lamp demo：BOOT 键(GPIO0)切状态，WS2812(GPIO48)显示对应颜色，并把颜色记进 NVS。
+// 开机先把上次的颜色读回来点亮；按键换色后存起来。掉电不丢。
+// 纯逻辑全在 lamp / lamp_store 组件里，这里只是薄薄的硬件胶水，不进单测。
 // WS2812 用 RMT 驱动 + vendor 进来的 led_strip_encoder，不依赖托管组件。
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/rmt_tx.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 #include "led_strip_encoder.h"
 #include "lamp.h"
+#include "lamp_store.h"
 
 #define BUTTON_GPIO         GPIO_NUM_0    // 板载 BOOT 键，按下接地（低有效）
 #define LED_GPIO            GPIO_NUM_48   // 板载 WS2812
@@ -25,6 +29,44 @@ static lamp_state_t s_state = LAMP_OFF;
 static inline uint8_t dim(uint8_t v)
 {
     return (uint16_t)v * BRIGHTNESS / 255;
+}
+
+// ---- lamp_store 的真 NVS 后端：掉电不丢的颜色记忆 ----
+// 逻辑（“存什么、读不到当灭的”）在 lamp_store 组件里；这里只管把一个字节
+// 读写到 NVS，是碰硬件的薄胶水。和测试工程里那份后端一致。
+#define LS_NVS_NAMESPACE "lampstore"
+#define LS_NVS_KEY       "state"
+
+static bool nvs_be_load(void *ctx, uint8_t *out)
+{
+    (void)ctx;
+    nvs_handle_t h;
+    if (nvs_open(LS_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;        // namespace 还不存在 = 从没存过
+    }
+    esp_err_t err = nvs_get_u8(h, LS_NVS_KEY, out);
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+static bool nvs_be_save(void *ctx, uint8_t value)
+{
+    (void)ctx;
+    nvs_handle_t h;
+    if (nvs_open(LS_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        return false;
+    }
+    esp_err_t err = nvs_set_u8(h, LS_NVS_KEY, value);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);   // commit 才真正落到 flash
+    }
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+static lamp_store_backend_t store_backend(void)
+{
+    return (lamp_store_backend_t){ .load = nvs_be_load, .save = nvs_be_save, .ctx = NULL };
 }
 
 static void led_init(void)
@@ -79,6 +121,11 @@ static void button_task(void *arg)
                 s_state = lamp_next(s_state);   // 纯逻辑算下一个状态
                 ESP_LOGI(TAG, "press -> state %d", s_state);
                 render(s_state);
+                // 换完色记进 NVS，下次开机能恢复
+                lamp_store_backend_t store = store_backend();
+                if (!lamp_store_save(&store, s_state)) {
+                    ESP_LOGW(TAG, "save state failed");
+                }
                 // 等松开，避免长按连发
                 while (gpio_get_level(BUTTON_GPIO) == 0) {
                     vTaskDelay(pdMS_TO_TICKS(10));
@@ -92,9 +139,23 @@ static void button_task(void *arg)
 
 void app_main(void)
 {
+    // NVS 初始化（颜色记忆要用）。没空间/版本变了就擦了重来。
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    } else {
+        ESP_ERROR_CHECK(err);
+    }
+
     led_init();
     button_init();
-    render(s_state);    // 初始：关
-    ESP_LOGI(TAG, "ready, press BOOT to cycle OFF/RED/GREEN/BLUE");
+
+    // 开机读回上次的颜色（从没存过 lamp_store 会给 LAMP_OFF），先点亮它。
+    lamp_store_backend_t store = store_backend();
+    s_state = lamp_store_load(&store);
+    render(s_state);
+    ESP_LOGI(TAG, "restored state %d; press BOOT to cycle OFF/RED/GREEN/BLUE", s_state);
+
     xTaskCreate(button_task, "button", 2048, NULL, 5, NULL);
 }

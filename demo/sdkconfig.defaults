@@ -1,0 +1,3 @@
+# 这块 ESP32-S3 是纯原生 USB，console 走芯片内置的 USB Serial/JTAG，
+# 不走 UART —— 否则插上去串口黑屏（UART 那几个脚没引出来）。
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
