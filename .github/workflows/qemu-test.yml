@@ -1,0 +1,40 @@
+# QEMU 单测的 CI：每次 push 和开/更新 PR 都自动跑一遍。
+# 云端机器没有板子，所以用 QEMU 模拟 esp32s3，跑 lamp_store 那条 pytest。
+name: qemu-tests
+
+on:
+  push:          # 任何分支 push 都触发
+  pull_request:  # 开 PR 或往 PR 推新提交都触发
+
+jobs:
+  qemu-tests:
+    runs-on: ubuntu-latest
+    # 和 host 单测同一个官方镜像，版本锁死成和本地一样的 5.5.2（别用 latest）。
+    container: espressif/idf:v5.5.2
+
+    steps:
+      # 1) 把仓库代码拉到容器里。
+      - uses: actions/checkout@v4
+
+      # 2) 装 QEMU 和 pytest-embedded，版本都钉死、别用最新的。
+      - name: 装 QEMU + pytest-embedded（版本钉死）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # GHA 不会跑镜像 entrypoint，得自己 source 出 IDF 环境。
+          . "${IDF_PATH}/export.sh"
+          # QEMU：用 IDF 自带的工具管理器装它“钉好的那一版”（espressif fork，
+          # 这里是 esp_develop_9.2.2）。别 apt 装系统 qemu —— 那是另一套 build，
+          # 既不认 esp32s3，又会和 IDF 自带工具冲突。
+          python "${IDF_PATH}/tools/idf_tools.py" install qemu-xtensa
+          # pytest-embedded 三件套钉到本地验证过的 1.11.5，别让 pip 抓最新。
+          pip install --no-input \
+            "pytest-embedded==1.11.5" \
+            "pytest-embedded-idf==1.11.5" \
+            "pytest-embedded-qemu==1.11.5"
+
+      # 3) 跑和本地一模一样的脚本（build esp32s3 + 在 QEMU 上跑 pytest）。
+      #    脚本里 pytest 失败会返回非 0，这一步就会红。
+      - name: 在 QEMU 上跑 pytest
+        shell: bash
+        run: ./ci/run_qemu_tests.sh
