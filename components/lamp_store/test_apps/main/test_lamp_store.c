@@ -3,20 +3,33 @@
 #include "unity.h"
 #include "lamp_store.h"
 
+#if !CONFIG_IDF_TARGET_LINUX
+#include "esp_system.h"     // esp_restart
+#include "nvs_flash.h"
+#include "nvs.h"
+#endif
+
 void app_main(void)
 {
-    // 非交互地跑完所有 TEST_CASE。同一份测试在 host(linux)、板子(esp32s3)、QEMU 上都能跑。
-    // 套 UNITY_BEGIN/END：unity_run_all_tests() 本身只逐条打 PASS/FAIL，不打总账；
-    // UNITY_END() 才会打出 "N Tests M Failures K Ignored" 汇总行 ——
-    // pytest-embedded 的 expect_unity_test_output() 靠这行判定整批是否通过。
+#if CONFIG_IDF_TARGET_LINUX
+    // host(linux)：非交互跑完所有用例（真重启用例只在板子/QEMU 编，这里没有）。
+    // 套 UNITY_BEGIN/END 打汇总行；跑完按失败数给退出码，host CI 直接看 elf 返回值。
     UNITY_BEGIN();
     unity_run_all_tests();
     UNITY_END();
-#if CONFIG_IDF_TARGET_LINUX
-    // FreeRTOS-on-linux 在 app_main 返回后不会退出进程，
-    // 按失败数主动退出，给自动化 / CI 一个明确的退出码。
-    // 在真板子 / QEMU 上没有“进程”可退，跑完让它 idle 即可，所以这段只在 host 编。
     exit(Unity.TestFailures == 0 ? 0 : 1);
+#else
+    // 板子 / QEMU：先把 NVS 初始化好。重启后 app_main 会再跑一遍，所以两阶段都覆盖。
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_ERROR_CHECK(nvs_flash_init());
+    } else {
+        ESP_ERROR_CHECK(err);
+    }
+    // 起 unity 菜单，交给 pytest 的 run_all_single_board_cases() 驱动；
+    // 多阶段（真重启）用例靠菜单在两阶段之间续跑。
+    unity_run_menu();
 #endif
 }
 
@@ -68,3 +81,62 @@ TEST_CASE("lamp_store: never stored reads as OFF", "[lamp_store]")
 
     TEST_ASSERT_EQUAL(LAMP_OFF, lamp_store_load(&b));
 }
+
+#if !CONFIG_IDF_TARGET_LINUX
+// ---- 真 NVS 后端：掉电不丢，给「真重启」测试用 ----
+// 这是碰硬件的薄胶水（按工程约定本该放 demo/）。放在测试工程里，是因为只有它
+// 需要在 QEMU/板子上验证“重启后还在”；以后接真板子可照搬到 demo/。
+#define LS_NVS_NAMESPACE "lampstore"
+#define LS_NVS_KEY       "state"
+
+static bool nvs_be_load(void *ctx, uint8_t *out)
+{
+    (void)ctx;
+    nvs_handle_t h;
+    if (nvs_open(LS_NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;        // namespace 还不存在 = 从没存过
+    }
+    esp_err_t err = nvs_get_u8(h, LS_NVS_KEY, out);
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+static bool nvs_be_save(void *ctx, uint8_t value)
+{
+    (void)ctx;
+    nvs_handle_t h;
+    if (nvs_open(LS_NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        return false;
+    }
+    esp_err_t err = nvs_set_u8(h, LS_NVS_KEY, value);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);   // commit 才真正落到 flash
+    }
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+static lamp_store_backend_t nvs_backend(void)
+{
+    return (lamp_store_backend_t){ .load = nvs_be_load, .save = nvs_be_save, .ctx = NULL };
+}
+
+// 阶段一（重启前）：存蓝，然后真的重启芯片。
+static void stage_save_blue_then_reboot(void)
+{
+    lamp_store_backend_t b = nvs_backend();
+    TEST_ASSERT_TRUE(lamp_store_save(&b, LAMP_BLUE));
+    esp_restart();   // 真重启；重启后由 pytest 续跑阶段二（这行之后不再返回）
+}
+
+// 阶段二（重启后）：读回来还得是蓝 —— 证明值扛过了一次真重启。
+static void stage_after_reboot_still_blue(void)
+{
+    lamp_store_backend_t b = nvs_backend();
+    TEST_ASSERT_EQUAL(LAMP_BLUE, lamp_store_load(&b));
+}
+
+// 官方多阶段写法：第一段跑完 esp_restart()，第二段在重启后跑。
+TEST_CASE_MULTIPLE_STAGES("lamp_store: BLUE survives a real reboot", "[lamp_store]",
+                          stage_save_blue_then_reboot, stage_after_reboot_still_blue);
+#endif // !CONFIG_IDF_TARGET_LINUX
