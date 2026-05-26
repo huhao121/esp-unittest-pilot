@@ -105,3 +105,8 @@ idf.py build flash monitor
 - `--filter '.*/<源文件>\.c$'` 不能省，否则 gcovr 会把一堆 ESP-IDF 文件也列进来。
 - 报告产物都在 `build/` 下，已被 `.gitignore` 忽略。
 - 改代码重测前旧 `.gcda` 会累积命中；想清零就 `idf.py fullclean`（`coverage.sh` 用全新 build 规避）。
+
+## 改动节奏（小步走）
+
+一次只落实我当前明确要求的那一件事，做完就停、简短说一句"下一步可做 X"等我定；
+别自动往下做——别顺手加测试、配 CI、改 demo，也别自己跑构建/QEMU/烧录。
